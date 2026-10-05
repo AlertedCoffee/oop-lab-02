@@ -2,9 +2,23 @@ import java.lang.reflect.Array;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Set;
 
 public final class MethodInvoker {
     private MethodInvoker() {
+    }
+
+    public static <T> T create(Class<T> type) {
+        if (type == null) {
+            throw new IllegalArgumentException("Нужен класс");
+        }
+        if (type.isPrimitive()) {
+            throw new IllegalArgumentException("Примитив не создаётся конструктором: " + type.getName());
+        }
+        return type.cast(argumentFor(type, new HashSet<Class<?>>()));
     }
 
     public static void invokeAnnotatedHidden(Object target) {
@@ -45,7 +59,7 @@ public final class MethodInvoker {
                     times);
 
             for (int i = 0; i < times; i++) {
-                Object[] args = argumentsFor(method.getParameterTypes());
+                Object[] args = argumentsFor(method.getParameterTypes(), new HashSet<Class<?>>());
                 try {
                     method.invoke(target, args);
                 } catch (Exception e) {
@@ -68,15 +82,15 @@ public final class MethodInvoker {
         return "package";
     }
 
-    private static Object[] argumentsFor(Class<?>[] types) {
+    private static Object[] argumentsFor(Class<?>[] types, Set<Class<?>> stack) {
         Object[] args = new Object[types.length];
         for (int i = 0; i < types.length; i++) {
-            args[i] = argumentFor(types[i]);
+            args[i] = argumentFor(types[i], stack);
         }
         return args;
     }
 
-    private static Object argumentFor(Class<?> type) {
+    private static Object argumentFor(Class<?> type, Set<Class<?>> stack) {
         if (type == boolean.class || type == Boolean.class) {
             return Boolean.TRUE;
         }
@@ -114,14 +128,51 @@ public final class MethodInvoker {
         if (type.isArray()) {
             return Array.newInstance(type.getComponentType(), 0);
         }
-        try {
-            Constructor<?> constructor = type.getDeclaredConstructor();
-            constructor.setAccessible(true);
-            return constructor.newInstance();
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalArgumentException(
-                    "Нельзя создать аргумент типа " + type.getName() + " без null",
-                    e);
+        return instantiate(type, stack);
+    }
+
+    private static Object instantiate(Class<?> type, Set<Class<?>> stack) {
+        if (stack.contains(type)) {
+            throw new IllegalArgumentException("Циклический конструктор: " + type.getName());
         }
+        if (type.isInterface() || Modifier.isAbstract(type.getModifiers())) {
+            throw new IllegalArgumentException("Нельзя создать экземпляр " + type.getName());
+        }
+
+        Constructor<?>[] constructors = type.getDeclaredConstructors();
+        Arrays.sort(constructors, Comparator.comparingInt(Constructor::getParameterCount));
+
+        ReflectiveOperationException failure = null;
+        IllegalArgumentException rejected = null;
+        for (Constructor<?> constructor : constructors) {
+            stack.add(type);
+            try {
+                constructor.setAccessible(true);
+                Class<?>[] params = constructor.getParameterTypes();
+                Object[] args = argumentsFor(params, stack);
+                Object instance = constructor.newInstance(args);
+                System.out.printf(
+                        "Вызов конструктора %s, параметров: %d%n",
+                        type.getSimpleName(),
+                        params.length);
+                return instance;
+            } catch (IllegalArgumentException e) {
+                rejected = e;
+            } catch (ReflectiveOperationException e) {
+                failure = e;
+            } finally {
+                stack.remove(type);
+            }
+        }
+
+        if (failure != null) {
+            throw new IllegalArgumentException(
+                    "Нельзя создать " + type.getName() + " без null",
+                    failure);
+        }
+        if (rejected != null) {
+            throw rejected;
+        }
+        throw new IllegalArgumentException("Нет конструктора у " + type.getName());
     }
 }
